@@ -1,8 +1,0 @@
-name: zz-runner-test
-on:
-  workflow_dispatch:
-jobs:
-  test-arm:
-    runs-on: windows-11-arm
-    steps:
-      - run: echo hi
