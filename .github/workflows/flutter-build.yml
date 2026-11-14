@@ -61,6 +61,10 @@ env:
   UPLOAD_ARTIFACT: "${{ inputs.upload-artifact }}"
   PUBLISH_UPDATE_METADATA: "${{ inputs.publish-update-metadata }}"
   SIGN_BASE_URL: "${{ secrets.SIGN_BASE_URL }}-2"
+  AZURE_SIGN: "${{ secrets.AZURE_CLIENT_ID != '' }}"
+  AZURE_SIGN_ENDPOINT: "https://weu.codesigning.azure.net/"
+  AZURE_SIGN_ACCOUNT: "kw-signing"
+  AZURE_SIGN_PROFILE: "kw-public"
 
 jobs:
   validate-update-metadata-keys:
@@ -420,6 +424,52 @@ jobs:
           pip3 install requests argparse
           BASE_URL=${{ env.SIGN_BASE_URL }} SECRET_KEY=${{ secrets.SIGN_SECRET_KEY }} python3 res/job.py sign_files ./rustdesk/
 
+      - name: Azure login for code signing
+        if: env.UPLOAD_ARTIFACT == 'true' && env.AZURE_SIGN == 'true'
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: List rustdesk files for Azure signing
+        if: env.UPLOAD_ARTIFACT == 'true' && env.AZURE_SIGN == 'true'
+        shell: pwsh
+        # Same selection as res/job.py sign_files: driver folders keep their vendor signatures, only their exe files are signed.
+        # The catalog lives outside ./rustdesk so it is not packed into the installer.
+        run: |
+          $root = (Resolve-Path ./rustdesk).Path
+          Get-ChildItem $root -Recurse -File |
+            Where-Object {
+              if ($_.DirectoryName -match 'RustDeskPrinterDriver|usbmmidd_v2') { $_.Extension -eq '.exe' }
+              else { $_.Extension -in '.exe', '.dll', '.sys' }
+            } |
+            ForEach-Object { 'rustdesk\' + $_.FullName.Substring($root.Length + 1) } |
+            Set-Content -Path ./azure-sign-payload.txt
+          Get-Content ./azure-sign-payload.txt
+
+      - name: Sign rustdesk files with Azure Artifact Signing
+        if: env.UPLOAD_ARTIFACT == 'true' && env.AZURE_SIGN == 'true'
+        uses: azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2.0.0
+        with:
+          endpoint: ${{ env.AZURE_SIGN_ENDPOINT }}
+          signing-account-name: ${{ env.AZURE_SIGN_ACCOUNT }}
+          certificate-profile-name: ${{ env.AZURE_SIGN_PROFILE }}
+          files-catalog: ${{ github.workspace }}\azure-sign-payload.txt
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      - name: Verify Azure signatures of rustdesk files
+        if: env.UPLOAD_ARTIFACT == 'true' && env.AZURE_SIGN == 'true'
+        shell: pwsh
+        run: |
+          Get-Content ./azure-sign-payload.txt | ForEach-Object {
+            $signature = Get-AuthenticodeSignature -LiteralPath $_ -ErrorAction Stop
+            if ($signature.Status -ne 'Valid') { throw "Invalid signature: $_ ($($signature.Status))" }
+            "$($signature.Status)  $($signature.SignerCertificate.Subject)  $_"
+          }
+
       - name: Verify Windows Flutter version
         if: env.UPLOAD_ARTIFACT == 'true' && env.PUBLISH_UPDATE_METADATA == 'true'
         shell: powershell
@@ -552,6 +602,38 @@ jobs:
         shell: bash
         run: |
           BASE_URL=${{ env.SIGN_BASE_URL }} SECRET_KEY=${{ secrets.SIGN_SECRET_KEY }} python3 res/job.py sign_files ./SignOutput
+
+      # Log in again: the OIDC session from the payload signing step may have expired during the msi builds.
+      - name: Azure login for installer signing
+        if: env.UPLOAD_ARTIFACT == 'true' && env.AZURE_SIGN == 'true'
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Sign installers with Azure Artifact Signing
+        if: env.UPLOAD_ARTIFACT == 'true' && env.AZURE_SIGN == 'true'
+        uses: azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2.0.0
+        with:
+          endpoint: ${{ env.AZURE_SIGN_ENDPOINT }}
+          signing-account-name: ${{ env.AZURE_SIGN_ACCOUNT }}
+          certificate-profile-name: ${{ env.AZURE_SIGN_PROFILE }}
+          files-folder: ${{ github.workspace }}\SignOutput
+          files-folder-filter: exe,msi
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      - name: Verify Azure signatures of installers
+        if: env.UPLOAD_ARTIFACT == 'true' && env.AZURE_SIGN == 'true'
+        shell: pwsh
+        run: |
+          Get-ChildItem ./SignOutput -File -Include *.exe, *.msi -Recurse | ForEach-Object {
+            $signature = Get-AuthenticodeSignature -LiteralPath $_.FullName -ErrorAction Stop
+            if ($signature.Status -ne 'Valid') { throw "Invalid signature: $($_.Name) ($($signature.Status))" }
+            "$($signature.Status)  $($signature.SignerCertificate.Subject)  $($_.Name)"
+          }
 
       - name: Upload signed Windows Flutter EXE
         if: env.UPLOAD_ARTIFACT == 'true' && env.PUBLISH_UPDATE_METADATA == 'true' && env.SIGN_BASE_URL != '-2'
@@ -715,6 +797,52 @@ jobs:
           pip3 install requests argparse
           BASE_URL=${{ env.SIGN_BASE_URL }} SECRET_KEY=${{ secrets.SIGN_SECRET_KEY }} python3 res/job.py sign_files ./Release/
 
+      - name: Azure login for code signing
+        if: env.UPLOAD_ARTIFACT == 'true' && env.AZURE_SIGN == 'true'
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: List rustdesk files for Azure signing
+        if: env.UPLOAD_ARTIFACT == 'true' && env.AZURE_SIGN == 'true'
+        shell: pwsh
+        # Same selection as res/job.py sign_files: driver folders keep their vendor signatures, only their exe files are signed.
+        # The catalog lives outside ./Release so it is not packed into the installer.
+        run: |
+          $root = (Resolve-Path ./Release).Path
+          Get-ChildItem $root -Recurse -File |
+            Where-Object {
+              if ($_.DirectoryName -match 'RustDeskPrinterDriver|usbmmidd_v2') { $_.Extension -eq '.exe' }
+              else { $_.Extension -in '.exe', '.dll', '.sys' }
+            } |
+            ForEach-Object { 'Release\' + $_.FullName.Substring($root.Length + 1) } |
+            Set-Content -Path ./azure-sign-payload.txt
+          Get-Content ./azure-sign-payload.txt
+
+      - name: Sign rustdesk files with Azure Artifact Signing
+        if: env.UPLOAD_ARTIFACT == 'true' && env.AZURE_SIGN == 'true'
+        uses: azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2.0.0
+        with:
+          endpoint: ${{ env.AZURE_SIGN_ENDPOINT }}
+          signing-account-name: ${{ env.AZURE_SIGN_ACCOUNT }}
+          certificate-profile-name: ${{ env.AZURE_SIGN_PROFILE }}
+          files-catalog: ${{ github.workspace }}\azure-sign-payload.txt
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      - name: Verify Azure signatures of rustdesk files
+        if: env.UPLOAD_ARTIFACT == 'true' && env.AZURE_SIGN == 'true'
+        shell: pwsh
+        run: |
+          Get-Content ./azure-sign-payload.txt | ForEach-Object {
+            $signature = Get-AuthenticodeSignature -LiteralPath $_ -ErrorAction Stop
+            if ($signature.Status -ne 'Valid') { throw "Invalid signature: $_ ($($signature.Status))" }
+            "$($signature.Status)  $($signature.SignerCertificate.Subject)  $_"
+          }
+
       - name: Verify Windows Sciter version
         if: env.UPLOAD_ARTIFACT == 'true' && env.PUBLISH_UPDATE_METADATA == 'true'
         shell: powershell
@@ -774,6 +902,37 @@ jobs:
         shell: bash
         run: |
           BASE_URL=${{ env.SIGN_BASE_URL }} SECRET_KEY=${{ secrets.SIGN_SECRET_KEY }} python3 res/job.py sign_files ./SignOutput/
+
+      - name: Azure login for installer signing
+        if: env.UPLOAD_ARTIFACT == 'true' && env.AZURE_SIGN == 'true'
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Sign installer with Azure Artifact Signing
+        if: env.UPLOAD_ARTIFACT == 'true' && env.AZURE_SIGN == 'true'
+        uses: azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2.0.0
+        with:
+          endpoint: ${{ env.AZURE_SIGN_ENDPOINT }}
+          signing-account-name: ${{ env.AZURE_SIGN_ACCOUNT }}
+          certificate-profile-name: ${{ env.AZURE_SIGN_PROFILE }}
+          files-folder: ${{ github.workspace }}\SignOutput
+          files-folder-filter: exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      - name: Verify Azure signature of installer
+        if: env.UPLOAD_ARTIFACT == 'true' && env.AZURE_SIGN == 'true'
+        shell: pwsh
+        run: |
+          Get-ChildItem ./SignOutput -File -Include *.exe -Recurse | ForEach-Object {
+            $signature = Get-AuthenticodeSignature -LiteralPath $_.FullName -ErrorAction Stop
+            if ($signature.Status -ne 'Valid') { throw "Invalid signature: $($_.Name) ($($signature.Status))" }
+            "$($signature.Status)  $($signature.SignerCertificate.Subject)  $($_.Name)"
+          }
 
       - name: Upload signed Windows Sciter EXE
         if: env.UPLOAD_ARTIFACT == 'true' && env.PUBLISH_UPDATE_METADATA == 'true' && env.SIGN_BASE_URL != '-2'
