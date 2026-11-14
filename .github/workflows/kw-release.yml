@@ -1,0 +1,19 @@
+name: KW Release Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      upload-tag:
+        description: "Release tag to upload the build to"
+        required: true
+        default: "kw-1.5.3"
+
+jobs:
+  run-kw-release-build:
+    # id-token: write lets the Windows jobs log in to Azure via OIDC for code signing.
+    permissions: write-all
+    uses: ./.github/workflows/flutter-build.yml
+    secrets: inherit
+    with:
+      upload-artifact: true
+      upload-tag: ${{ inputs.upload-tag }}
